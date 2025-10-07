@@ -1,5 +1,7 @@
+import os
 import re
 import asyncio
+import subprocess
 from urllib.parse import urljoin
 
 import httpx
@@ -15,6 +17,10 @@ UA = {
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"
     )
 }
+
+# Put Playwright browser cache somewhere writable on Streamlit Cloud
+BROWSER_CACHE = "/tmp/ms-playwright"
+os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", BROWSER_CACHE)
 
 # ---------------- REGEX PATTERNS ----------------
 M3U8_URL_RE = re.compile(r'https?://[^\s"\'<>]+\.m3u8(?:\?[^\s"\'<>]*)?', re.I)
@@ -64,8 +70,8 @@ def looks_like_master_mpd(url: str) -> bool:
     try:
         with httpx.Client(headers=UA, follow_redirects=True, timeout=8) as c:
             r = c.get(url)
-            text = r.text
-            return "<Period" in text and "<AdaptationSet" in text
+            t = r.text
+            return "<Period" in t and "<AdaptationSet" in t
     except Exception:
         return False
 
@@ -80,7 +86,7 @@ def choose_best(candidates: list[str]) -> str | None:
             return u
     return candidates[0]
 
-def find_media_static(page_url: str, iframe_depth: int = 1):
+def find_media_static(page_url: str, iframe_depth: int = 0):
     try:
         html, final_url = fetch_text(page_url)
     except Exception as e:
@@ -106,7 +112,35 @@ def find_media_static(page_url: str, iframe_depth: int = 1):
     deduped = list(dict.fromkeys(all_candidates))
     return choose_best(deduped), deduped, None
 
+# ---------- Auto-install Playwright browsers (once per container) ----------
+@st.cache_resource(show_spinner=False)
+def ensure_playwright_browser():
+    """
+    Installs Chromium for Playwright into /tmp if it's missing.
+    Cached so it runs only once per container/session on Streamlit Cloud.
+    """
+    chromium_dir = os.path.join(BROWSER_CACHE, "chromium")
+    if os.path.exists(chromium_dir) and os.listdir(chromium_dir):
+        return True
+    try:
+        # plain install (no --with-deps; apt-get is not available on Streamlit Cloud)
+        subprocess.run(
+            ["playwright", "install", "chromium"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        return True
+    except Exception as e:
+        st.error(f"Playwright install failed: {e}")
+        return False
+
+# ---------------- PLAYWRIGHT (JS RENDERING) ----------------
 async def find_media_playwright(url: str, wait_time: float = 5.0):
+    if not ensure_playwright_browser():
+        return None, [], "Playwright browser install failed."
+
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
@@ -118,19 +152,23 @@ async def find_media_playwright(url: str, wait_time: float = 5.0):
         html = await page.content()
         final_url = page.url
         await browser.close()
+
     candidates = find_media_urls_in_html(html, final_url)
     return choose_best(candidates), candidates, None
 
 # ---------------- UI ----------------
 st.title("🎯 Media Stream Finder")
-st.caption("Find .m3u8, .mpd, and .m4s URLs (HLS & DASH). Works with static HTML and optional JS rendering via Playwright.")
+st.caption("Find .m3u8, .mpd, and .m4s URLs (HLS & DASH). Static HTML by default; toggle JS mode if needed.")
 
 url = st.text_input("Page URL", placeholder="https://example.com/watch/123")
 col1, col2 = st.columns(2)
 with col1:
-    depth = st.selectbox("Iframe depth", options=[0, 1, 2], index=1, help="Scan embedded players inside iframes.")
+    # Default to 0 to keep it simple; raise to 1–2 only if the site nests players in iframes.
+    depth = st.selectbox("Iframe depth (0 = off)", options=[0, 1, 2], index=0,
+                         help="How many layers of embedded players to scan. If unsure, leave at 0.")
 with col2:
-    use_js = st.checkbox("Enable JavaScript (Playwright)", value=False, help="Render JS with headless Chromium.")
+    use_js = st.checkbox("Enable JavaScript (Playwright)", value=False,
+                         help="Render JS with headless Chromium. Slower; use only if static mode finds nothing.")
 
 if st.button("Find Streams", type="primary") and url:
     with st.spinner("Scanning…"):
@@ -155,23 +193,6 @@ if st.button("Find Streams", type="primary") and url:
         else:
             st.info("No verified master manifest found; showing first candidate.")
             st.code(candidates[0], language=None)
-
         with st.expander("All candidates found"):
             for u in candidates:
                 st.write(u)
-
-NOTES = "\n".join([
-    "**Notes**",
-    "",
-    "- Static mode parses HTML and iframes.",
-    "- JS mode uses Playwright with Chromium new headless (`--headless=new`).",
-    "- Setup:",
-    "",
-    "```bash",
-    "pip install -r requirements.txt",
-    "playwright install chromium",
-    "streamlit run streamlit_app.py",
-    "```",
-])
-st.markdown(NOTES)
-
