@@ -6,8 +6,6 @@ import httpx
 import streamlit as st
 from playwright.async_api import async_playwright
 
-# ---------------- CONFIG ----------------
-
 st.set_page_config(page_title="🎯 Media Stream Finder", page_icon="🎯", layout="centered")
 
 UA = {
@@ -17,42 +15,36 @@ UA = {
     )
 }
 
-# ---------------- REGEX PATTERNS ----------------
-
 M3U8_URL_RE = re.compile(r'https?://[^\s"\'<>]+\.m3u8(?:\?[^\s"\'<>]*)?', re.I)
-MPD_URL_RE  = re.compile(r'https?://[^\s"\'<>]+\.mpd(?:\?[^\s"\'<>]*)?', re.I)
-M4S_URL_RE  = re.compile(r'https?://[^\s"\'<>]+\.m4s(?:\?[^\s"\'<>]*)?', re.I)
+MPD_URL_RE = re.compile(r'https?://[^\s"\'<>]+\.mpd(?:\?[^\s"\'<>]*)?', re.I)
+M4S_URL_RE = re.compile(r'https?://[^\s"\'<>]+\.m4s(?:\?[^\s"\'<>]*)?', re.I)
 SRC_ATTR_RE = re.compile(r'''src\s*=\s*["']([^"']+)["']''', re.I)
 
-# ---------------- HELPERS ----------------
 
 def absolutize(base: str, path: str) -> str:
-    """Join relative URLs to the base page."""
     return urljoin(base, path)
 
+
 def fetch_text(url: str, timeout: float = 20.0):
-    """Fetch static HTML text using httpx."""
     with httpx.Client(headers=UA, follow_redirects=True, timeout=timeout) as c:
         r = c.get(url)
         r.raise_for_status()
         return r.text, str(r.url)
 
+
 def find_media_urls_in_html(html: str, base_url: str):
-    """Extract .m3u8, .mpd, .m4s URLs (absolute or relative) from HTML."""
     found = set()
-    # Absolute URLs
     for regex in (M3U8_URL_RE, MPD_URL_RE, M4S_URL_RE):
         for u in regex.findall(html):
             found.add(u)
-    # Relative src= attributes
     for m in SRC_ATTR_RE.finditer(html):
         val = m.group(1)
         if any(ext in val.lower() for ext in (".m3u8", ".mpd", ".m4s")):
             found.add(absolutize(base_url, val))
-    return list(dict.fromkeys(found))  # dedupe, preserve order
+    return list(dict.fromkeys(found))
+
 
 def find_iframes(html: str, base_url: str):
-    """Extract iframe URLs."""
     iframes = []
     for m in SRC_ATTR_RE.finditer(html):
         val = m.group(1)
@@ -61,8 +53,8 @@ def find_iframes(html: str, base_url: str):
             iframes.append(absolutize(base_url, val))
     return list(dict.fromkeys(iframes))
 
+
 def looks_like_master_m3u8(url: str) -> bool:
-    """Check if a .m3u8 playlist looks like a master manifest."""
     try:
         with httpx.Client(headers=UA, follow_redirects=True, timeout=8) as c:
             r = c.get(url)
@@ -71,8 +63,8 @@ def looks_like_master_m3u8(url: str) -> bool:
     except Exception:
         return False
 
+
 def looks_like_master_mpd(url: str) -> bool:
-    """Check if an .mpd manifest looks like a master (top-level DASH)."""
     try:
         with httpx.Client(headers=UA, follow_redirects=True, timeout=8) as c:
             r = c.get(url)
@@ -82,26 +74,21 @@ def looks_like_master_mpd(url: str) -> bool:
     except Exception:
         return False
 
+
 def choose_best(candidates: list[str]) -> str | None:
-    """Pick the best candidate among found URLs."""
     if not candidates:
         return None
-
-    # Prefer verified master MPD
     for u in candidates:
         if u.lower().endswith(".mpd") and looks_like_master_mpd(u):
             return u
-
-    # Prefer verified master M3U8
     masters = [u for u in candidates if "master" in u.lower() and u.lower().endswith(".m3u8")]
     for u in masters + candidates:
         if u.lower().endswith(".m3u8") and looks_like_master_m3u8(u):
             return u
-
     return candidates[0]
 
+
 def find_media_static(page_url: str, iframe_depth: int = 1, max_iframes_per_level: int = 10):
-    """Recursively scan a page and its iframes for streaming URLs (static HTML)."""
     try:
         html, final_url = fetch_text(page_url)
     except Exception as e:
@@ -129,10 +116,8 @@ def find_media_static(page_url: str, iframe_depth: int = 1, max_iframes_per_leve
     best = choose_best(deduped)
     return best, deduped, None
 
-# ---------------- PLAYWRIGHT (JS RENDERING) ----------------
 
 async def find_media_playwright(url: str, wait_time: float = 5.0):
-    """Use Playwright to fetch rendered HTML and extract media URLs."""
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
@@ -149,7 +134,6 @@ async def find_media_playwright(url: str, wait_time: float = 5.0):
     best = choose_best(candidates)
     return best, candidates, None
 
-# ---------------- STREAMLIT UI ----------------
 
 st.title("🎯 Media Stream Finder")
 st.caption(
@@ -197,13 +181,17 @@ if run and url:
             for u in candidates:
                 st.write(u)
 
-st.markdown("""
+# --- Properly closed markdown block ---
+st.markdown(
+    """
 **Notes**
+
 - The static scanner works for most sites with direct media links.  
 - The JavaScript mode uses **Playwright + headless Chromium** (`--headless=new`) for modern Chrome compatibility.  
 - JS mode is slower but necessary for sites that load streams dynamically.  
 - To set up locally:
-  ```bash
-  pip install -r requirements.txt
-  playwright install chromium
-  streamlit run streamlit_app.py
+
+```bash
+pip install -r requirements.txt
+playwright install chromium
+streamlit run streamlit_app.py
