@@ -64,7 +64,8 @@ def looks_like_master_mpd(url: str) -> bool:
     try:
         with httpx.Client(headers=UA, follow_redirects=True, timeout=8) as c:
             r = c.get(url)
-            return "<Period" in r.text and "<AdaptationSet" in r.text
+            text = r.text
+            return "<Period" in text and "<AdaptationSet" in text
     except Exception:
         return False
 
@@ -77,7 +78,7 @@ def choose_best(candidates: list[str]) -> str | None:
     for u in candidates:
         if u.lower().endswith(".m3u8") and looks_like_master_m3u8(u):
             return u
-    return candidates[0] if candidates else None
+    return candidates[0]
 
 def find_media_static(page_url: str, iframe_depth: int = 1):
     try:
@@ -101,10 +102,11 @@ def find_media_static(page_url: str, iframe_depth: int = 1):
             all_candidates += find_media_urls_in_html(ihtml, ifinal)
             next_iframes += find_iframes(ihtml, ifinal)[:10]
         iframes = next_iframes
+
     deduped = list(dict.fromkeys(all_candidates))
     return choose_best(deduped), deduped, None
 
-async def find_media_playwright(url: str):
+async def find_media_playwright(url: str, wait_time: float = 5.0):
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
@@ -112,22 +114,23 @@ async def find_media_playwright(url: str):
         )
         page = await browser.new_page()
         await page.goto(url, wait_until="networkidle", timeout=30000)
+        await asyncio.sleep(wait_time)
         html = await page.content()
         final_url = page.url
         await browser.close()
     candidates = find_media_urls_in_html(html, final_url)
     return choose_best(candidates), candidates, None
 
-# ---------------- STREAMLIT UI ----------------
+# ---------------- UI ----------------
 st.title("🎯 Media Stream Finder")
-st.caption("Find **.m3u8**, **.mpd**, or **.m4s** URLs from a webpage — static or JS-rendered.")
+st.caption("Find .m3u8, .mpd, and .m4s URLs (HLS & DASH). Works with static HTML and optional JS rendering via Playwright.")
 
 url = st.text_input("Page URL", placeholder="https://example.com/watch/123")
 col1, col2 = st.columns(2)
 with col1:
-    depth = st.selectbox("Iframe depth", options=[0,1,2], index=1)
+    depth = st.selectbox("Iframe depth", options=[0, 1, 2], index=1, help="Scan embedded players inside iframes.")
 with col2:
-    use_js = st.checkbox("Enable JavaScript (Playwright)", value=False)
+    use_js = st.checkbox("Enable JavaScript (Playwright)", value=False, help="Render JS with headless Chromium.")
 
 if st.button("Find Streams", type="primary") and url:
     with st.spinner("Scanning…"):
@@ -135,7 +138,7 @@ if st.button("Find Streams", type="primary") and url:
             try:
                 best, candidates, err = asyncio.run(find_media_playwright(url))
             except Exception as e:
-                best, candidates, err = None, [], str(e)
+                best, candidates, err = None, [], f"Playwright failed: {e}"
         else:
             best, candidates, err = find_media_static(url, int(depth))
 
@@ -144,23 +147,31 @@ if st.button("Find Streams", type="primary") and url:
     elif not candidates:
         st.warning("No media URLs found.")
     else:
-        st.success("✅ Scan complete!")
+        st.success("Scan complete!")
         if best:
             st.subheader("Best (Master) URL")
-            st.code(best)
+            st.code(best, language=None)
+            st.download_button("Copy as text", data=best, file_name="stream_url.txt", mime="text/plain")
         else:
-            st.info("No verified master manifest found.")
-        with st.expander("All candidates"):
+            st.info("No verified master manifest found; showing first candidate.")
+            st.code(candidates[0], language=None)
+
+        with st.expander("All candidates found"):
             for u in candidates:
                 st.write(u)
 
-st.markdown(
-    """
-**Notes**
-- Static mode parses plain HTML.
-- JavaScript mode runs a real headless Chromium (`--headless=new`).
-- Use:
-  ```bash
-  pip install -r requirements.txt
-  playwright install chromium
-  streamlit run streamlit_app.py
+NOTES = "\n".join([
+    "**Notes**",
+    "",
+    "- Static mode parses HTML and iframes.",
+    "- JS mode uses Playwright with Chromium new headless (`--headless=new`).",
+    "- Setup:",
+    "",
+    "```bash",
+    "pip install -r requirements.txt",
+    "playwright install chromium",
+    "streamlit run streamlit_app.py",
+    "```",
+])
+st.markdown(NOTES)
+
