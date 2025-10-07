@@ -3,76 +3,115 @@ from urllib.parse import urljoin
 import httpx
 import streamlit as st
 
-st.set_page_config(page_title="M3U8 Finder", page_icon="🎯", layout="centered")
+# ---------------- CONFIG ----------------
 
-UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                    "KHTML, like Gecko) Chrome/124 Safari/537.36"}
+st.set_page_config(page_title="🎯 Media Stream Finder", page_icon="🎯", layout="centered")
+
+UA = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"
+    )
+}
+
+# ---------------- REGEX PATTERNS ----------------
 
 M3U8_URL_RE = re.compile(r'https?://[^\s"\'<>]+\.m3u8(?:\?[^\s"\'<>]*)?', re.I)
+MPD_URL_RE  = re.compile(r'https?://[^\s"\'<>]+\.mpd(?:\?[^\s"\'<>]*)?', re.I)
+M4S_URL_RE  = re.compile(r'https?://[^\s"\'<>]+\.m4s(?:\?[^\s"\'<>]*)?', re.I)
 SRC_ATTR_RE = re.compile(r'''src\s*=\s*["']([^"']+)["']''', re.I)
 
+# ---------------- HELPERS ----------------
+
 def absolutize(base: str, path: str) -> str:
+    """Join relative URLs to the base page."""
     return urljoin(base, path)
 
 def fetch_text(url: str, timeout: float = 20.0):
+    """Fetch URL text with redirects and proper UA."""
     with httpx.Client(headers=UA, follow_redirects=True, timeout=timeout) as c:
         r = c.get(url)
         r.raise_for_status()
         return r.text, str(r.url)
 
-def find_m3u8_in_html(html: str, base_url: str):
+def find_media_urls_in_html(html: str, base_url: str):
+    """Extract .m3u8, .mpd, .m4s URLs (absolute or relative) from HTML."""
     found = set()
-    # Absolute .m3u8
-    for u in M3U8_URL_RE.findall(html):
-        found.add(u)
-    # Any src="..." that contains .m3u8 (may be relative)
+
+    # Absolute URLs
+    for regex in (M3U8_URL_RE, MPD_URL_RE, M4S_URL_RE):
+        for u in regex.findall(html):
+            found.add(u)
+
+    # Relative src= attributes
     for m in SRC_ATTR_RE.finditer(html):
         val = m.group(1)
-        if ".m3u8" in val.lower():
+        if any(ext in val.lower() for ext in (".m3u8", ".mpd", ".m4s")):
             found.add(absolutize(base_url, val))
-    return list(dict.fromkeys(found))  # dedupe, keep order
+
+    return list(dict.fromkeys(found))  # Deduplicate while preserving order
 
 def find_iframes(html: str, base_url: str):
+    """Extract iframe URLs."""
     iframes = []
     for m in SRC_ATTR_RE.finditer(html):
         val = m.group(1)
-        # quick-and-dirty context check for <iframe ... src="...">
         ctx = html[max(0, m.start()-20):m.start()+20].lower()
         if "<iframe" in ctx:
             iframes.append(absolutize(base_url, val))
     return list(dict.fromkeys(iframes))
 
-def looks_like_master(url: str) -> bool:
+def looks_like_master_m3u8(url: str) -> bool:
+    """Check if a .m3u8 playlist looks like a master manifest."""
     try:
         with httpx.Client(headers=UA, follow_redirects=True, timeout=8) as c:
             r = c.get(url)
             r.raise_for_status()
-            # Master playlists contain variant lines:
             return "#EXT-X-STREAM-INF" in r.text
     except Exception:
         return False
 
+def looks_like_master_mpd(url: str) -> bool:
+    """Check if an .mpd manifest looks like a master (top-level DASH)."""
+    try:
+        with httpx.Client(headers=UA, follow_redirects=True, timeout=8) as c:
+            r = c.get(url)
+            r.raise_for_status()
+            text = r.text
+            return "<Period" in text and "<AdaptationSet" in text
+    except Exception:
+        return False
+
 def choose_best(candidates: list[str]) -> str | None:
+    """Pick the best candidate among found URLs."""
     if not candidates:
         return None
-    masters = [u for u in candidates if "master" in u.lower()]
-    for u in masters + candidates:
-        if looks_like_master(u):
+
+    # Prefer verified master MPD
+    for u in candidates:
+        if u.lower().endswith(".mpd") and looks_like_master_mpd(u):
             return u
+
+    # Prefer verified master M3U8
+    masters = [u for u in candidates if "master" in u.lower() and u.lower().endswith(".m3u8")]
+    for u in masters + candidates:
+        if u.lower().endswith(".m3u8") and looks_like_master_m3u8(u):
+            return u
+
     return candidates[0]
 
-def find_m3u8_deep(page_url: str, iframe_depth: int = 1, max_iframes_per_level: int = 10):
+def find_media_deep(page_url: str, iframe_depth: int = 1, max_iframes_per_level: int = 10):
+    """Recursively scan a page and its iframes for streaming URLs."""
     try:
         html, final_url = fetch_text(page_url)
     except Exception as e:
         return None, [], f"Fetch failed: {e}"
 
-    all_candidates = []
-    all_candidates += find_m3u8_in_html(html, final_url)
+    all_candidates = find_media_urls_in_html(html, final_url)
 
-    # scan iframes breadth-first up to iframe_depth
     frontier = find_iframes(html, final_url)[:max_iframes_per_level]
     seen = set()
+
     for _ in range(iframe_depth):
         next_frontier = []
         for iframe_url in frontier:
@@ -83,7 +122,7 @@ def find_m3u8_deep(page_url: str, iframe_depth: int = 1, max_iframes_per_level: 
                 ihtml, ifinal = fetch_text(iframe_url)
             except Exception:
                 continue
-            all_candidates += find_m3u8_in_html(ihtml, ifinal)
+            all_candidates += find_media_urls_in_html(ihtml, ifinal)
             next_frontier += find_iframes(ihtml, ifinal)[:max_iframes_per_level]
         frontier = next_frontier
 
@@ -91,47 +130,46 @@ def find_m3u8_deep(page_url: str, iframe_depth: int = 1, max_iframes_per_level: 
     best = choose_best(deduped)
     return best, deduped, None
 
-# ---------------- UI ----------------
+# ---------------- STREAMLIT UI ----------------
 
-st.title("🎯 Master M3U8 Finder")
-st.caption("Paste a page URL. I’ll return the best (master) .m3u8 and any other candidates I can find.")
+st.title("🎯 Media Stream Finder")
+st.caption("Paste a webpage URL — I'll scan for **.m3u8**, **.mpd**, and **.m4s** URLs, and identify the best (master) manifest.")
 
 url = st.text_input("Page URL", placeholder="https://example.com/watch/123")
 col1, col2, col3 = st.columns([1,1,2])
 with col1:
     depth = st.selectbox("Iframe depth", options=[0,1,2], index=1, help="Scan embedded players inside iframes.")
 with col2:
-    run = st.button("Find M3U8", type="primary")
+    run = st.button("Find Streams", type="primary")
 
 st.divider()
 
 if run and url:
     with st.spinner("Scanning…"):
-        best, candidates, err = find_m3u8_deep(url, iframe_depth=int(depth))
+        best, candidates, err = find_media_deep(url, iframe_depth=int(depth))
     if err:
         st.error(err)
     elif not candidates:
-        st.warning("No .m3u8 links found. The site may build URLs via JS at runtime or block bots.")
+        st.warning("No media URLs found. The site may build URLs dynamically via JavaScript.")
     else:
-        st.success("Done")
-        st.subheader("Best (master) URL")
+        st.success("✅ Scan complete!")
+        st.subheader("🎬 Best (Master) Stream URL")
         if best:
             st.code(best, language=None)
-            st.download_button("Copy as text", data=best, file_name="m3u8.txt", mime="text/plain")
+            st.download_button("Copy as text", data=best, file_name="stream_url.txt", mime="text/plain")
         else:
-            st.info("Couldn't verify a master playlist; showing first candidate instead:")
+            st.info("No verified master manifest found; showing first candidate instead:")
             st.code(candidates[0], language=None)
 
-        with st.expander("All candidates"):
+        with st.expander("All candidates found"):
             for u in candidates:
                 st.write(u)
 
 st.markdown(
     """
 **Notes**
-- This simple version scans static HTML (and iframes). If the player constructs the URL only via JavaScript/XHR,
-  Streamlit Cloud won’t see it without a headless browser.  
-- Need JS-heavy support? Deploy on Render/Railway with **Playwright** and a headless Chromium.
+- This tool parses static HTML (and iframes).  
+- If the player loads media URLs dynamically via JavaScript or XHR, those won't appear here.  
+- For full JS support, deploy this app with **Playwright** or **headless Chromium**.
 """
 )
-
