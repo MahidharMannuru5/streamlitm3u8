@@ -1,7 +1,10 @@
 import re
+import asyncio
 from urllib.parse import urljoin
+
 import httpx
 import streamlit as st
+from playwright.async_api import async_playwright
 
 # ---------------- CONFIG ----------------
 
@@ -28,7 +31,7 @@ def absolutize(base: str, path: str) -> str:
     return urljoin(base, path)
 
 def fetch_text(url: str, timeout: float = 20.0):
-    """Fetch URL text with redirects and proper UA."""
+    """Fetch static HTML text using httpx."""
     with httpx.Client(headers=UA, follow_redirects=True, timeout=timeout) as c:
         r = c.get(url)
         r.raise_for_status()
@@ -100,15 +103,14 @@ def choose_best(candidates: list[str]) -> str | None:
 
     return candidates[0]
 
-def find_media_deep(page_url: str, iframe_depth: int = 1, max_iframes_per_level: int = 10):
-    """Recursively scan a page and its iframes for streaming URLs."""
+def find_media_static(page_url: str, iframe_depth: int = 1, max_iframes_per_level: int = 10):
+    """Recursively scan a page and its iframes for streaming URLs (static HTML)."""
     try:
         html, final_url = fetch_text(page_url)
     except Exception as e:
         return None, [], f"Fetch failed: {e}"
 
     all_candidates = find_media_urls_in_html(html, final_url)
-
     frontier = find_iframes(html, final_url)[:max_iframes_per_level]
     seen = set()
 
@@ -130,23 +132,56 @@ def find_media_deep(page_url: str, iframe_depth: int = 1, max_iframes_per_level:
     best = choose_best(deduped)
     return best, deduped, None
 
+# ---------------- PLAYWRIGHT (JS RENDERING) ----------------
+
+async def find_media_playwright(url: str, wait_time: float = 5.0):
+    """Use Playwright to fetch rendered HTML and extract media URLs."""
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--headless=new", "--no-sandbox", "--disable-dev-shm-usage"]
+        )
+        page = await browser.new_page()
+        await page.goto(url, wait_until="networkidle", timeout=30000)
+        await asyncio.sleep(wait_time)
+        html = await page.content()
+        final_url = page.url
+        await browser.close()
+
+    candidates = find_media_urls_in_html(html, final_url)
+    best = choose_best(candidates)
+    return best, candidates, None
+
 # ---------------- STREAMLIT UI ----------------
 
 st.title("🎯 Media Stream Finder")
-st.caption("Paste a webpage URL — I'll scan for **.m3u8**, **.mpd**, and **.m4s** URLs, and identify the best (master) manifest.")
+st.caption(
+    "Paste a webpage URL — I'll scan for **.m3u8**, **.mpd**, and **.m4s** URLs, "
+    "and identify the best (master) manifest. Works with static and JS-rendered pages."
+)
 
 url = st.text_input("Page URL", placeholder="https://example.com/watch/123")
 col1, col2, col3 = st.columns([1,1,2])
 with col1:
     depth = st.selectbox("Iframe depth", options=[0,1,2], index=1, help="Scan embedded players inside iframes.")
 with col2:
+    use_js = st.checkbox("Enable JavaScript (Playwright)", value=False, help="Use headless Chromium to render JS-heavy sites.")
+with col3:
     run = st.button("Find Streams", type="primary")
 
 st.divider()
 
 if run and url:
     with st.spinner("Scanning…"):
-        best, candidates, err = find_media_deep(url, iframe_depth=int(depth))
+        if use_js:
+            try:
+                best, candidates, err = asyncio.run(find_media_playwright(url))
+            except Exception as e:
+                err = f"Playwright failed: {e}"
+                best, candidates = None, []
+        else:
+            best, candidates, err = find_media_static(url, iframe_depth=int(depth))
+
     if err:
         st.error(err)
     elif not candidates:
@@ -168,8 +203,8 @@ if run and url:
 st.markdown(
     """
 **Notes**
-- This tool parses static HTML (and iframes).  
-- If the player loads media URLs dynamically via JavaScript or XHR, those won't appear here.  
-- For full JS support, deploy this app with **Playwright** or **headless Chromium**.
-"""
-)
+- The static scanner works for most sites with direct media links.
+- The JavaScript mode uses **Playwright + headless Chromium** (`--headless=new`) for modern Chrome compatibility.
+- JS mode is slower but necessary for sites that load streams dynamically.
+- To set up:
+
