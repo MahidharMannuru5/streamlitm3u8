@@ -40,26 +40,23 @@ def fetch_text(url: str, timeout: float = 20.0):
 def find_media_urls_in_html(html: str, base_url: str):
     """Extract .m3u8, .mpd, .m4s URLs (absolute or relative) from HTML."""
     found = set()
-
     # Absolute URLs
     for regex in (M3U8_URL_RE, MPD_URL_RE, M4S_URL_RE):
         for u in regex.findall(html):
             found.add(u)
-
     # Relative src= attributes
     for m in SRC_ATTR_RE.finditer(html):
         val = m.group(1)
         if any(ext in val.lower() for ext in (".m3u8", ".mpd", ".m4s")):
             found.add(absolutize(base_url, val))
-
-    return list(dict.fromkeys(found))  # Deduplicate while preserving order
+    return list(dict.fromkeys(found))  # dedupe, preserve order
 
 def find_iframes(html: str, base_url: str):
     """Extract iframe URLs."""
     iframes = []
     for m in SRC_ATTR_RE.finditer(html):
         val = m.group(1)
-        ctx = html[max(0, m.start()-20):m.start()+20].lower()
+        ctx = html[max(0, m.start() - 20):m.start() + 20].lower()
         if "<iframe" in ctx:
             iframes.append(absolutize(base_url, val))
     return list(dict.fromkeys(iframes))
@@ -161,9 +158,9 @@ st.caption(
 )
 
 url = st.text_input("Page URL", placeholder="https://example.com/watch/123")
-col1, col2, col3 = st.columns([1,1,2])
+col1, col2, col3 = st.columns([1, 1, 2])
 with col1:
-    depth = st.selectbox("Iframe depth", options=[0,1,2], index=1, help="Scan embedded players inside iframes.")
+    depth = st.selectbox("Iframe depth", options=[0, 1, 2], index=1, help="Scan embedded players inside iframes.")
 with col2:
     use_js = st.checkbox("Enable JavaScript (Playwright)", value=False, help="Use headless Chromium to render JS-heavy sites.")
 with col3:
@@ -200,11 +197,13 @@ if run and url:
             for u in candidates:
                 st.write(u)
 
-st.markdown(
-    """
+st.markdown("""
 **Notes**
-- The static scanner works for most sites with direct media links.
-- The JavaScript mode uses **Playwright + headless Chromium** (`--headless=new`) for modern Chrome compatibility.
-- JS mode is slower but necessary for sites that load streams dynamically.
-- To set up:
-
+- The static scanner works for most sites with direct media links.  
+- The JavaScript mode uses **Playwright + headless Chromium** (`--headless=new`) for modern Chrome compatibility.  
+- JS mode is slower but necessary for sites that load streams dynamically.  
+- To set up locally:
+  ```bash
+  pip install -r requirements.txt
+  playwright install chromium
+  streamlit run streamlit_app.py
